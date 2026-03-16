@@ -1,0 +1,193 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        id: govulncheck
+        run: |
+          set +e
+          OUTPUT=$(govulncheck ./... 2>&1)
+          EXIT_CODE=$?
+          echo "$OUTPUT"
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "output<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+
+      - name: Write security summary
+        if: always()
+        run: |
+          if [ "${{ steps.govulncheck.outputs.exit_code }}" = "0" ]; then
+            echo "## Security Scan" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ No vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Security Scan" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ Vulnerabilities found — release blocked" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "${{ steps.govulncheck.outputs.output }}" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  version:
+    name: Bump version
+    needs: security
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version
+        id: bump
+        run: |
+          CURRENT=$(cat VERSION | tr -d '[:space:]')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "${{ github.event.inputs.bump }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "$NEW_VERSION" > VERSION
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore: release v${{ steps.bump.outputs.new_version }}"
+          git tag -a "v${{ steps.bump.outputs.new_version }}" -m "Release v${{ steps.bump.outputs.new_version }}"
+          git push origin HEAD --tags
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.version.outputs.new_version }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          VERSION=${{ needs.version.outputs.new_version }}
+          BINARY=kgps
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY=kgps.exe
+          fi
+          go build -ldflags "-s -w -X main.version=${VERSION}" -o "${BINARY}" .
+
+      - name: Package
+        run: |
+          VERSION=${{ needs.version.outputs.new_version }}
+          OS=${{ matrix.goos }}
+          ARCH=${{ matrix.goarch }}
+          ARCHIVE_NAME="kgps_${VERSION}_${OS}_${ARCH}"
+
+          if [ "$OS" = "windows" ]; then
+            zip "${ARCHIVE_NAME}.zip" kgps.exe
+            echo "ARTIFACT=${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "${ARCHIVE_NAME}.tar.gz" kgps
+            echo "ARTIFACT=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.ARTIFACT }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum * > checksums.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          VERSION=${{ needs.version.outputs.new_version }}
+          gh release create "v${VERSION}" \
+            --generate-notes \
+            artifacts/* artifacts/checksums.txt
+
+      - name: Write release summary
+        run: |
+          VERSION=${{ needs.version.outputs.new_version }}
+          echo "## Release v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Artifact | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for f in artifacts/*; do
+            NAME=$(basename "$f")
+            SIZE=$(du -sh "$f" | cut -f1)
+            echo "| \`${NAME}\` | ${SIZE} |" >> "$GITHUB_STEP_SUMMARY"
+          done
