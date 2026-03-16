@@ -69,12 +69,13 @@ func printUsage(kubeconfigDefault string) {
 		fmt.Printf("  %-38s %s%s\n", nameCol+argCol, desc.Sprint(description), defCol)
 	}
 
-	row("-n, -namespace", "namespace", "Namespace to list pods in.", "current context")
+	row("-n, --namespace", "namespace", "Namespace to list pods in.", "current context")
 	row("-A", "", "List pods across all namespaces.", "")
-	row("-w, -watch", "", "Watch for pod changes.", "")
+	row("-w, --watch", "", "Watch for pod changes.", "")
+	row("-r, --has-restarts", "", "Only show pods with restarts.", "")
 	row("--kubeconfig", "path", "Path to kubeconfig file.", kubeconfigDefault)
-	row("-v, -version", "", "Print version and exit.", "")
-	row("-h, -help", "", "Show this help message.", "")
+	row("-v, --version", "", "Print version and exit.", "")
+	row("-h, --help", "", "Show this help message.", "")
 	fmt.Println()
 }
 
@@ -96,6 +97,8 @@ func main() {
 	allNamespaces := flag.Bool("A", false, "")
 	watchFlag := flag.Bool("w", false, "")
 	flag.BoolVar(watchFlag, "watch", false, "")
+	hasRestartsFlag := flag.Bool("has-restarts", false, "")
+	flag.BoolVar(hasRestartsFlag, "r", false, "")
 	versionFlag := flag.Bool("version", false, "")
 	flag.BoolVar(versionFlag, "v", false, "")
 
@@ -141,7 +144,11 @@ func main() {
 
 	rows := make([]podRow, 0, len(pods.Items))
 	for _, pod := range pods.Items {
-		rows = append(rows, buildRow(pod))
+		row := buildRow(pod)
+		if *hasRestartsFlag && row.restarts == "0" {
+			continue
+		}
+		rows = append(rows, row)
 	}
 
 	widths := printTable(rows, *allNamespaces)
@@ -174,6 +181,9 @@ func main() {
 				continue
 			}
 			row := buildRow(*pod)
+			if *hasRestartsFlag && row.restarts == "0" {
+				continue
+			}
 			// Expand column widths if this pod is wider than what we've seen.
 			cols := rowCols(row, *allNamespaces)
 			for i, c := range cols {
