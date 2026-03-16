@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +21,18 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-var version = "dev" // overridden by ldflags at release build time
+var version = "dev" // overridden by ldflags at release build time; falls back to module version via ReadBuildInfo
+
+func init() {
+	if version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok {
+			v := info.Main.Version
+			if v != "" && v != "(devel)" {
+				version = strings.TrimPrefix(v, "v")
+			}
+		}
+	}
+}
 
 func die(msg string, err error) {
 	fmt.Fprintf(os.Stderr, "error: %s: %v\n", msg, err)
