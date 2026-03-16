@@ -177,7 +177,7 @@ jobs:
           VERSION=${{ needs.version.outputs.new_version }}
           gh release create "v${VERSION}" \
             --generate-notes \
-            artifacts/* artifacts/checksums.txt
+            artifacts/*
 
       - name: Write release summary
         run: |
